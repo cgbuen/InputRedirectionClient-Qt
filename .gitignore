@@ -38,3 +38,5 @@
 # QMake build
 Makefile
 .qmake.stash
+
+.DS_Store

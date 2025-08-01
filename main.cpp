@@ -21,6 +21,8 @@
 #include <QSettings>
 #include <QComboBox>
 #include <QPainter>
+#include <QKeyEvent>
+#include <QLabel>
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +39,7 @@ typedef uint8_t u8;
 
 double lx = 0.0, ly = 0.0;
 double rx = 0.0, ry = 0.0;
-QGamepadManager::GamepadButtons buttons = 0;
+QGamepadManager::GamepadButtons buttons;
 u32 interfaceButtons = 0;
 QString ipAddress;
 int yAxisMultiplier = 1;
@@ -48,6 +50,19 @@ bool touchScreenPressed;
 QPoint touchScreenPosition;
 
 QSettings settings("TuxSH", "InputRedirectionClient-Qt");
+
+// Turbo VC Reset button variables
+QTimer *turboVcResetTimer = nullptr;
+QTimer *turboATimer = nullptr; // Global reference to turbo A timer
+bool turboVcResetActive = false;
+int turboVcResetStage = 0;
+int turboVcResetCount = 0;
+const int TURBO_VC_RESET_STAGES = 3; // Number of stages in the sequence
+int turboVcResetIntervalMs = settings.value("turboVcResetIntervalMs", 500).toInt(); // 0.5 seconds between VC resets
+int turboVcResetWaitMs = settings.value("turboVcResetWaitMs", 5000).toInt(); // 5 seconds wait before turbo A
+int turboADurationMs = settings.value("turboADurationMs", 13500).toInt(); // 13.5 seconds
+const int TURBO_A_INTERVAL_MS = 250;   // 0.25 seconds
+int turboAMaxCount = turboADurationMs / TURBO_A_INTERVAL_MS; // Calculate max count based on duration
 
 QGamepadManager::GamepadButton variantToButton(QVariant variant)
 {
@@ -199,6 +214,114 @@ void sendFrame(void)
     qToLittleEndian(cppState, (uchar *)ba.data() + 12);
     qToLittleEndian(interfaceButtons, (uchar *)ba.data() + 16);
     QUdpSocket().writeDatagram(ba, QHostAddress(ipAddress), 4950);
+}
+
+void startTurboVcReset()
+{
+    if (turboVcResetActive) return;
+    
+    qDebug() << "Starting Turbo VC Reset sequence...";
+    turboVcResetActive = true;
+    turboVcResetStage = 0;
+    turboVcResetCount = 0;
+    
+    if (!turboVcResetTimer) {
+        turboVcResetTimer = new QTimer();
+        turboVcResetTimer->setSingleShot(true);
+        QObject::connect(turboVcResetTimer, &QTimer::timeout, []() {
+            if (!turboVcResetActive) return;
+            
+            switch (turboVcResetStage) {
+                case 0: // Stage 1: Trigger VC Reset 3 times
+                    if (turboVcResetCount < TURBO_VC_RESET_STAGES) {
+                        qDebug() << "VC Reset" << (turboVcResetCount + 1) << "of" << TURBO_VC_RESET_STAGES;
+                        // Trigger VC Reset
+                        touchScreenPressed = true;
+                        touchScreenPosition = QPoint(TOUCH_SCREEN_WIDTH - 75, TOUCH_SCREEN_HEIGHT - 55);
+                        sendFrame();
+                        
+                        // Release after 50ms
+                        QTimer::singleShot(50, [=]() {
+                            touchScreenPressed = false;
+                            sendFrame();
+                        });
+                        
+                        turboVcResetCount++;
+                        
+                        // Schedule next VC Reset
+                        if (turboVcResetCount < TURBO_VC_RESET_STAGES) {
+                            turboVcResetTimer->start(turboVcResetIntervalMs);
+                        } else {
+                            // Move to stage 2: Wait 5 seconds
+                            qDebug() << "VC Reset sequence complete. Waiting" << (turboVcResetWaitMs/1000.0) << "seconds before Turbo A...";
+                            turboVcResetStage = 1;
+                            turboVcResetTimer->start(turboVcResetWaitMs);
+                        }
+                    }
+                    break;
+                    
+                case 1: // Stage 2: Start Turbo A sequence
+                    qDebug() << "Starting Turbo A sequence...";
+                    turboVcResetStage = 2;
+                    turboVcResetCount = 0;
+                    
+                    // Start the turbo A timer
+                    turboATimer = new QTimer();
+                    turboATimer->setSingleShot(false);
+                    QObject::connect(turboATimer, &QTimer::timeout, []() {
+                        if (turboVcResetActive && turboVcResetCount < turboAMaxCount) {
+                            // Press A button
+                            buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsAB[0]);
+                            sendFrame();
+                            
+                            // Release A button after a short delay
+                            QTimer::singleShot(50, [=]() {
+                                buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
+                                sendFrame();
+                            });
+                            
+                            turboVcResetCount++;
+                        } else {
+                            // Stop turbo mode
+                            qDebug() << "Turbo VC Reset sequence complete!";
+                            turboVcResetActive = false;
+                            turboATimer->stop();
+                            turboATimer->deleteLater();
+                            turboATimer = nullptr;
+                        }
+                    });
+                    
+                    turboATimer->start(TURBO_A_INTERVAL_MS);
+                    break;
+            }
+        });
+    }
+    
+    // Start the sequence
+    turboVcResetTimer->start(0); // Start immediately
+}
+
+void stopTurboVcReset()
+{
+    if (!turboVcResetActive) return;
+    
+    qDebug() << "Stopping Turbo VC Reset sequence...";
+    turboVcResetActive = false;
+    
+    if (turboVcResetTimer) {
+        turboVcResetTimer->stop();
+    }
+    
+    if (turboATimer) {
+        turboATimer->stop();
+        turboATimer->deleteLater();
+        turboATimer = nullptr;
+    }
+    
+    // Reset any active button states
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
+    touchScreenPressed = false;
+    sendFrame();
 }
 
 struct GamepadMonitor : public QObject {
@@ -602,9 +725,12 @@ private:
     QFormLayout *formLayout;
     QLineEdit *addrLineEdit;
     QCheckBox *invertYCheckbox, *invertABCheckbox, *invertXYCheckbox;
-    QPushButton *homeButton, *powerButton, *longPowerButton, *remapConfigButton;
+    QPushButton *homeButton, *powerButton, *longPowerButton, *aButton, *vcResetButton, *remapConfigButton, *turboAButton, *stopTurboButton;
     TouchScreen *touchScreen;
     RemapConfig *remapConfig;
+    
+    // Timer configuration inputs
+    QLineEdit *turboVcResetIntervalEdit, *turboVcResetWaitEdit, *turboADurationEdit;
 public:
     Widget(QWidget *parent = nullptr) : QWidget(parent)
     {
@@ -622,16 +748,57 @@ public:
         formLayout->addRow(tr("&Invert Y axis"), invertYCheckbox);
         formLayout->addRow(tr("Invert A<->&B"), invertABCheckbox);
         formLayout->addRow(tr("Invert X<->&Y"), invertXYCheckbox);
+        
+        // Timer configuration section
+        formLayout->addRow(tr(""), new QLabel(tr("Turbo VC Reset Timer Settings:"), this));
+        formLayout->addRow(tr("VC Reset Interval (ms)"), turboVcResetIntervalEdit = new QLineEdit(this));
+        formLayout->addRow(tr("Wait Time (ms)"), turboVcResetWaitEdit = new QLineEdit(this));
+        formLayout->addRow(tr("Turbo A Duration (ms)"), turboADurationEdit = new QLineEdit(this));
+        
         remapConfigButton = new QPushButton(tr("BUTTON &CONFIG"), this);
+        remapConfigButton->setFocusPolicy(Qt::StrongFocus);
 
         homeButton = new QPushButton(tr("&HOME"), this);
+        homeButton->setFocusPolicy(Qt::StrongFocus);
         powerButton = new QPushButton(tr("&POWER"), this);
+        powerButton->setFocusPolicy(Qt::StrongFocus);
         longPowerButton = new QPushButton(tr("POWER (&long)"), this);
+        longPowerButton->setFocusPolicy(Qt::StrongFocus);
+        aButton = new QPushButton(tr("&A BUTTON"), this);
+        aButton->setFocusPolicy(Qt::StrongFocus);
+        vcResetButton = new QPushButton(tr("VC &RESET"), this);
+        vcResetButton->setFocusPolicy(Qt::StrongFocus);
+        turboAButton = new QPushButton(tr("TURBO VC &RESET"), this);
+        turboAButton->setFocusPolicy(Qt::StrongFocus);
+        turboAButton->setToolTip(tr("Start the Turbo VC Reset sequence (VC Reset x3, wait, then Turbo A)"));
+        stopTurboButton = new QPushButton(tr("STOP TURBO VC &RESET"), this);
+        stopTurboButton->setFocusPolicy(Qt::StrongFocus);
+        stopTurboButton->setToolTip(tr("Stop the currently running Turbo VC Reset sequence"));
+
+        // Initialize timer configuration inputs
+        turboVcResetIntervalEdit->setClearButtonEnabled(true);
+        turboVcResetIntervalEdit->setText(QString::number(turboVcResetIntervalMs));
+        turboVcResetIntervalEdit->setPlaceholderText("500");
+        turboVcResetIntervalEdit->setToolTip(tr("Time between VC Reset button presses (in milliseconds)"));
+        
+        turboVcResetWaitEdit->setClearButtonEnabled(true);
+        turboVcResetWaitEdit->setText(QString::number(turboVcResetWaitMs));
+        turboVcResetWaitEdit->setPlaceholderText("5000");
+        turboVcResetWaitEdit->setToolTip(tr("Wait time after VC Reset sequence before starting Turbo A (in milliseconds)"));
+        
+        turboADurationEdit->setClearButtonEnabled(true);
+        turboADurationEdit->setText(QString::number(turboADurationMs));
+        turboADurationEdit->setPlaceholderText("13500");
+        turboADurationEdit->setToolTip(tr("Total duration of the Turbo A sequence (in milliseconds)"));
 
         layout->addLayout(formLayout);
         layout->addWidget(homeButton);
         layout->addWidget(powerButton);
         layout->addWidget(longPowerButton);
+        layout->addWidget(aButton);
+        layout->addWidget(vcResetButton);
+        layout->addWidget(turboAButton);
+        layout->addWidget(stopTurboButton);
         layout->addWidget(remapConfigButton);
 
         connect(addrLineEdit, &QLineEdit::textChanged, this,
@@ -692,6 +859,41 @@ public:
             }
         });
 
+        // Timer configuration connections
+        connect(turboVcResetIntervalEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value > 0) {
+                turboVcResetIntervalMs = value;
+                settings.setValue("turboVcResetIntervalMs", value);
+            }
+        });
+
+        connect(turboVcResetWaitEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value >= 0) {
+                turboVcResetWaitMs = value;
+                settings.setValue("turboVcResetWaitMs", value);
+            }
+        });
+
+        connect(turboADurationEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value > 0) {
+                turboADurationMs = value;
+                turboAMaxCount = value / TURBO_A_INTERVAL_MS;
+                settings.setValue("turboADurationMs", value);
+            }
+        });
+
         connect(homeButton, &QPushButton::pressed, this,
                 [](void)
         {
@@ -734,6 +936,47 @@ public:
            sendFrame();
         });
 
+        connect(aButton, &QPushButton::pressed, this,
+                [](void)
+        {
+           buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsAB[0]);
+           sendFrame();
+        });
+
+        connect(aButton, &QPushButton::released, this,
+                [](void)
+        {
+           buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
+           sendFrame();
+        });
+
+        connect(vcResetButton, &QPushButton::pressed, this,
+                [](void)
+        {
+           touchScreenPressed = true;
+           touchScreenPosition = QPoint(TOUCH_SCREEN_WIDTH - 75, TOUCH_SCREEN_HEIGHT - 55);
+           sendFrame();
+        });
+
+        connect(vcResetButton, &QPushButton::released, this,
+                [](void)
+        {
+           touchScreenPressed = false;
+           sendFrame();
+        });
+
+        connect(turboAButton, &QPushButton::pressed, this,
+                [](void)
+        {
+           startTurboVcReset();
+        });
+
+        connect(stopTurboButton, &QPushButton::pressed, this,
+                [](void)
+        {
+           stopTurboVcReset();
+        });
+
         connect(remapConfigButton, &QPushButton::released, this,
                 [this](void)
         {
@@ -757,7 +1000,7 @@ public:
         remapConfig->hide();
     }
 
-    void closeEvent(QCloseEvent *ev)
+    void closeEvent(QCloseEvent *ev) override
     {
         touchScreen->close();
         remapConfig->close();
@@ -767,12 +1010,48 @@ public:
     virtual ~Widget(void)
     {
         lx = ly = rx = ry = 0.0;
-        buttons = 0;
+        buttons = QGamepadManager::GamepadButtons();
         interfaceButtons = 0;
         touchScreenPressed = false;
+        
+        // Stop and cleanup turbo A timer
+        if (turboVcResetTimer) {
+            turboVcResetTimer->stop();
+            delete turboVcResetTimer;
+            turboVcResetTimer = nullptr;
+        }
+        if (turboATimer) {
+            turboATimer->stop();
+            delete turboATimer;
+            turboATimer = nullptr;
+        }
+        turboVcResetActive = false;
+        
         sendFrame();
         delete touchScreen;
         delete remapConfig;
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        switch(event->key())
+        {
+            case Qt::Key_Tab:
+                // Let Qt handle tab navigation
+                QWidget::keyPressEvent(event);
+                break;
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+                // Trigger the currently focused button
+                if (QPushButton *focusedButton = qobject_cast<QPushButton*>(focusWidget()))
+                {
+                    focusedButton->click();
+                }
+                break;
+            default:
+                QWidget::keyPressEvent(event);
+                break;
+        }
     }
 
 };
