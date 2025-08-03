@@ -40,6 +40,19 @@ If you have multiple controllers connected at the same time, this software will 
    ./InputRedirectionClient-Qt.app/Contents/MacOS/InputRedirectionClient-Qt
    ```
 
+4. **For standalone distribution** (can be double-clicked from Finder):
+   ```bash
+   ./build-qt5.sh
+   ```
+   This automatically bundles Qt libraries using `macdeployqt` after building.
+
+   Or manually:
+   ```bash
+   /usr/local/Cellar/qt@5/5.15.16_2/bin/macdeployqt InputRedirectionClient-Qt.app
+   ```
+
+**Note**: Without running `macdeployqt`, the app will only work when run from terminal because it depends on Qt5 libraries installed via Homebrew. The `macdeployqt` tool bundles these libraries with the app for standalone distribution.
+
 #### Linux
 1. Install Qt5 development packages:
    ```bash
