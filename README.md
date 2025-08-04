@@ -101,6 +101,7 @@ The **"STOP TURBO VC RESET"** button allows you to immediately interrupt the Tur
 
 ## Features
 - Gamepad input redirection to 3DS
+- **Multi-IP Support** - Send inputs to multiple 3DS consoles simultaneously
 - Touch screen simulation
 - Button remapping
 - Turbo VC Reset functionality (triggers VC Reset 3 times with 0.5s intervals, waits 5s, then triggers A button every 0.25s for 13.5 seconds)
@@ -108,3 +109,31 @@ The **"STOP TURBO VC RESET"** button allows you to immediately interrupt the Tur
 - **Stop button** - Immediately stop the Turbo VC Reset sequence at any time
 - Y-axis inversion
 - A/B and X/Y button inversion
+
+## Multi-IP Support
+
+The application now supports sending inputs to multiple 3DS consoles simultaneously:
+
+### IP Manager
+- Click the **"IP MANAGER"** button to open the IP management dialog
+- Add multiple IP addresses with custom names
+- Enable/disable individual IP targets
+- Use "Enable All" and "Disable All" buttons for quick management
+- All settings are automatically saved and restored
+
+### Status Display
+- The main window shows which IP targets are currently active
+- Green text indicates active targets, red text indicates no active targets
+- Real-time status updates when IP settings are changed
+
+### Usage
+1. Click the prominent **"IP MANAGER"** button (green button at the top)
+2. Add your 3DS console IP addresses (e.g., 192.168.1.100, 192.168.1.101)
+3. Give each target a descriptive name (e.g., "3DS 1", "3DS 2")
+4. Enable the targets you want to send inputs to
+5. Click "Save" to apply changes
+6. All gamepad inputs will now be sent to all enabled targets simultaneously
+
+### Backward Compatibility
+- Existing single-IP configurations are automatically migrated
+- Settings are preserved between application sessions

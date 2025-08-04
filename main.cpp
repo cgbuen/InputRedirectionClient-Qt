@@ -23,9 +23,13 @@
 #include <QPainter>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QTableWidget>
+#include <QHBoxLayout>
+#include <QHeaderView>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #define CPAD_BOUND          0x5d0
 #define CPP_BOUND           0x7f
@@ -41,7 +45,14 @@ double lx = 0.0, ly = 0.0;
 double rx = 0.0, ry = 0.0;
 QGamepadManager::GamepadButtons buttons;
 u32 interfaceButtons = 0;
-QString ipAddress;
+
+// Multi-IP support: Replace single ipAddress with a list
+struct IPTarget {
+    QString address;
+    bool enabled;
+    QString name;  // Optional display name
+};
+QList<IPTarget> ipTargets;
 int yAxisMultiplier = 1;
 bool abInverse = false;
 bool xyInverse = false;
@@ -213,7 +224,11 @@ void sendFrame(void)
     qToLittleEndian(circlePadState, (uchar *)ba.data() + 8);
     qToLittleEndian(cppState, (uchar *)ba.data() + 12);
     qToLittleEndian(interfaceButtons, (uchar *)ba.data() + 16);
-    QUdpSocket().writeDatagram(ba, QHostAddress(ipAddress), 4950);
+    for (const auto& target : ipTargets) {
+        if (target.enabled) {
+            QUdpSocket().writeDatagram(ba, QHostAddress(target.address), 4950);
+        }
+    }
 }
 
 void startTurboVcReset()
@@ -718,16 +733,167 @@ public:
     }
 };
 
+struct IPManagerDialog : public QDialog {
+private:
+    QVBoxLayout *layout;
+    QTableWidget *ipTable;
+    QPushButton *addButton, *removeButton, *saveButton, *closeButton;
+    std::function<void()> statusUpdateCallback;
+    
+    void updateTable() {
+        ipTable->setRowCount(ipTargets.size());
+        for (int i = 0; i < ipTargets.size(); ++i) {
+            const auto& target = ipTargets.at(i);
+            
+            // Enable checkbox
+            QCheckBox *enabledCheck = new QCheckBox();
+            enabledCheck->setChecked(target.enabled);
+            ipTable->setCellWidget(i, 0, enabledCheck);
+            
+            // Name field
+            QLineEdit *nameEdit = new QLineEdit(target.name);
+            ipTable->setCellWidget(i, 1, nameEdit);
+            
+            // IP address field
+            QLineEdit *addrEdit = new QLineEdit(target.address);
+            ipTable->setCellWidget(i, 2, addrEdit);
+        }
+    }
+    
+    void saveToSettings() {
+        QList<QVariant> addresses, enabledStates, names;
+        
+        for (int i = 0; i < ipTable->rowCount(); ++i) {
+            QCheckBox *enabledCheck = qobject_cast<QCheckBox*>(ipTable->cellWidget(i, 0));
+            QLineEdit *nameEdit = qobject_cast<QLineEdit*>(ipTable->cellWidget(i, 1));
+            QLineEdit *addrEdit = qobject_cast<QLineEdit*>(ipTable->cellWidget(i, 2));
+            
+            if (enabledCheck && nameEdit && addrEdit) {
+                addresses.append(addrEdit->text());
+                enabledStates.append(enabledCheck->isChecked());
+                names.append(nameEdit->text());
+            }
+        }
+        
+        settings.setValue("ipAddresses", addresses);
+        settings.setValue("ipEnabled", enabledStates);
+        settings.setValue("ipNames", names);
+        
+        // Update global ipTargets
+        ipTargets.clear();
+        for (int i = 0; i < addresses.size(); ++i) {
+            IPTarget target;
+            target.address = addresses.at(i).toString();
+            target.enabled = enabledStates.at(i).toBool();
+            target.name = names.at(i).toString();
+            ipTargets.append(target);
+        }
+        
+        // Call status update callback if provided
+        if (statusUpdateCallback) {
+            statusUpdateCallback();
+        }
+    }
+
+public:
+    IPManagerDialog(QWidget *parent = nullptr, std::function<void()> callback = nullptr) : QDialog(parent), statusUpdateCallback(callback) {
+        this->setFixedSize(500, 400);
+        this->setWindowFlags(Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+        this->setWindowTitle(tr("InputRedirectionClient-Qt - IP Manager"));
+
+        layout = new QVBoxLayout(this);
+        
+        // Create table
+        ipTable = new QTableWidget(this);
+        ipTable->setColumnCount(3);
+        ipTable->setHorizontalHeaderLabels({tr("Enabled"), tr("Name"), tr("IP Address")});
+        ipTable->horizontalHeader()->setStretchLastSection(true);
+        
+        // Buttons
+        QHBoxLayout *buttonLayout = new QHBoxLayout();
+        addButton = new QPushButton(tr("&Add IP"), this);
+        removeButton = new QPushButton(tr("&Remove"), this);
+        QPushButton *enableAllButton = new QPushButton(tr("Enable &All"), this);
+        QPushButton *disableAllButton = new QPushButton(tr("Disable &All"), this);
+        saveButton = new QPushButton(tr("&Save"), this);
+        closeButton = new QPushButton(tr("&Cancel"), this);
+        
+        buttonLayout->addWidget(addButton);
+        buttonLayout->addWidget(removeButton);
+        buttonLayout->addWidget(enableAllButton);
+        buttonLayout->addWidget(disableAllButton);
+        buttonLayout->addStretch();
+        buttonLayout->addWidget(saveButton);
+        buttonLayout->addWidget(closeButton);
+        
+        layout->addWidget(ipTable);
+        layout->addLayout(buttonLayout);
+        
+        // Connect signals
+        connect(addButton, &QPushButton::clicked, this, [this]() {
+            ipTable->insertRow(ipTable->rowCount());
+            int row = ipTable->rowCount() - 1;
+            
+            QCheckBox *enabledCheck = new QCheckBox();
+            enabledCheck->setChecked(true);
+            ipTable->setCellWidget(row, 0, enabledCheck);
+            
+            QLineEdit *nameEdit = new QLineEdit(tr("Target %1").arg(row + 1));
+            ipTable->setCellWidget(row, 1, nameEdit);
+            
+            QLineEdit *addrEdit = new QLineEdit();
+            addrEdit->setPlaceholderText("192.168.1.100");
+            ipTable->setCellWidget(row, 2, addrEdit);
+        });
+        
+        connect(removeButton, &QPushButton::clicked, this, [this]() {
+            int currentRow = ipTable->currentRow();
+            if (currentRow >= 0) {
+                ipTable->removeRow(currentRow);
+            }
+        });
+        
+        connect(enableAllButton, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < ipTable->rowCount(); ++i) {
+                if (QCheckBox *enabledCheck = qobject_cast<QCheckBox*>(ipTable->cellWidget(i, 0))) {
+                    enabledCheck->setChecked(true);
+                }
+            }
+        });
+        
+        connect(disableAllButton, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < ipTable->rowCount(); ++i) {
+                if (QCheckBox *enabledCheck = qobject_cast<QCheckBox*>(ipTable->cellWidget(i, 0))) {
+                    enabledCheck->setChecked(false);
+                }
+            }
+        });
+        
+        connect(saveButton, &QPushButton::clicked, this, [this]() {
+            saveToSettings();
+            this->accept();
+        });
+        
+        connect(closeButton, &QPushButton::clicked, this, [this]() {
+            this->reject();
+        });
+        
+        // Initialize table with current data
+        updateTable();
+    }
+};
+
 class Widget : public QWidget
 {
 private:
     QVBoxLayout *layout;
     QFormLayout *formLayout;
-    QLineEdit *addrLineEdit;
     QCheckBox *invertYCheckbox, *invertABCheckbox, *invertXYCheckbox;
-    QPushButton *homeButton, *powerButton, *longPowerButton, *aButton, *vcResetButton, *remapConfigButton, *turboAButton, *stopTurboButton;
+    QPushButton *homeButton, *powerButton, *longPowerButton, *aButton, *vcResetButton, *remapConfigButton, *turboAButton, *stopTurboButton, *ipManagerButton;
+    QLabel *statusLabel;
     TouchScreen *touchScreen;
     RemapConfig *remapConfig;
+    IPManagerDialog *ipManager;
     
     // Timer configuration inputs
     QLineEdit *turboVcResetIntervalEdit, *turboVcResetWaitEdit, *turboADurationEdit;
@@ -736,15 +902,11 @@ public:
     {
         layout = new QVBoxLayout(this);
 
-        addrLineEdit = new QLineEdit(this);
-        addrLineEdit->setClearButtonEnabled(true);
-
         invertYCheckbox = new QCheckBox(this);
         invertABCheckbox = new QCheckBox(this);
         invertXYCheckbox = new QCheckBox(this);
         formLayout = new QFormLayout;
 
-        formLayout->addRow(tr("IP &address"), addrLineEdit);
         formLayout->addRow(tr("&Invert Y axis"), invertYCheckbox);
         formLayout->addRow(tr("Invert A<->&B"), invertABCheckbox);
         formLayout->addRow(tr("Invert X<->&Y"), invertXYCheckbox);
@@ -757,6 +919,9 @@ public:
         
         remapConfigButton = new QPushButton(tr("BUTTON &CONFIG"), this);
         remapConfigButton->setFocusPolicy(Qt::StrongFocus);
+        ipManagerButton = new QPushButton(tr("IP &MANAGER"), this);
+        ipManagerButton->setFocusPolicy(Qt::StrongFocus);
+        ipManagerButton->setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 8px; border-radius: 4px; } QPushButton:hover { background-color: #45a049; }");
 
         homeButton = new QPushButton(tr("&HOME"), this);
         homeButton->setFocusPolicy(Qt::StrongFocus);
@@ -792,6 +957,7 @@ public:
         turboADurationEdit->setToolTip(tr("Total duration of the Turbo A sequence (in milliseconds)"));
 
         layout->addLayout(formLayout);
+        layout->addWidget(ipManagerButton);
         layout->addWidget(homeButton);
         layout->addWidget(powerButton);
         layout->addWidget(longPowerButton);
@@ -800,13 +966,14 @@ public:
         layout->addWidget(turboAButton);
         layout->addWidget(stopTurboButton);
         layout->addWidget(remapConfigButton);
+        
+        // Status label to show active IPs
+        statusLabel = new QLabel(this);
+        statusLabel->setWordWrap(true);
+        statusLabel->setStyleSheet("QLabel { color: green; font-weight: bold; }");
+        layout->addWidget(statusLabel);
 
-        connect(addrLineEdit, &QLineEdit::textChanged, this,
-                [](const QString &text)
-        {
-            ipAddress = text;
-            settings.setValue("ipAddress", text);
-        });
+
 
         connect(invertYCheckbox, &QCheckBox::stateChanged, this,
                 [](int state)
@@ -983,11 +1150,47 @@ public:
            remapConfig->show();
         });
 
+        connect(ipManagerButton, &QPushButton::released, this,
+                [this](void)
+        {
+           ipManager->show();
+        });
+
         touchScreen = new TouchScreen(nullptr);
         remapConfig = new RemapConfig(nullptr, touchScreen);
+        ipManager = new IPManagerDialog(nullptr, [this]() { updateStatusDisplay(); });
         this->setWindowTitle(tr("InputRedirectionClient-Qt"));
 
-        addrLineEdit->setText(settings.value("ipAddress", "").toString());
+        // Initialize ipTargets from settings
+        QList<QVariant> ipAddresses = settings.value("ipAddresses", QVariantList()).toList();
+        QList<QVariant> enabledStates = settings.value("ipEnabled", QVariantList()).toList();
+        QList<QVariant> names = settings.value("ipNames", QVariantList()).toList();
+
+        for (int i = 0; i < ipAddresses.size(); ++i) {
+            IPTarget target;
+            target.address = ipAddresses.at(i).toString();
+            target.enabled = enabledStates.at(i).toBool();
+            target.name = names.at(i).toString();
+            ipTargets.append(target);
+        }
+
+        // If no IPs are configured, add a default one for backward compatibility
+        if (ipTargets.isEmpty()) {
+            QString defaultIP = settings.value("ipAddress", "").toString();
+            if (!defaultIP.isEmpty()) {
+                IPTarget target;
+                target.address = defaultIP;
+                target.enabled = true;
+                target.name = tr("Default");
+                ipTargets.append(target);
+            }
+        }
+
+
+        
+        // Update status display
+        updateStatusDisplay();
+        
         invertYCheckbox->setChecked(settings.value("invertY", false).toBool());
         invertABCheckbox->setChecked(settings.value("invertAB", false).toBool());
         invertXYCheckbox->setChecked(settings.value("invertXY", false).toBool());
@@ -1004,6 +1207,7 @@ public:
     {
         touchScreen->close();
         remapConfig->close();
+        ipManager->close();
         ev->accept();
     }
 
@@ -1030,6 +1234,26 @@ public:
         sendFrame();
         delete touchScreen;
         delete remapConfig;
+        delete ipManager;
+    }
+
+    void updateStatusDisplay() {
+        QStringList activeIPs;
+        for (const auto& target : ipTargets) {
+            if (target.enabled) {
+                QString display = target.name.isEmpty() ? target.address : QString("%1 (%2)").arg(target.name, target.address);
+                activeIPs.append(display);
+            }
+        }
+        
+        if (activeIPs.isEmpty()) {
+            statusLabel->setText(tr("No active IP targets"));
+            statusLabel->setStyleSheet("QLabel { color: red; font-weight: bold; }");
+        } else {
+            QString statusText = tr("Active targets (%1): %2").arg(activeIPs.size()).arg(activeIPs.join(", "));
+            statusLabel->setText(statusText);
+            statusLabel->setStyleSheet("QLabel { color: green; font-weight: bold; }");
+        }
     }
 
     void keyPressEvent(QKeyEvent *event) override
