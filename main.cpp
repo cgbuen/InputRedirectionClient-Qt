@@ -75,6 +75,21 @@ int turboADurationMs = settings.value("turboADurationMs", 13500).toInt(); // 13.
 const int TURBO_A_INTERVAL_MS = 250;   // 0.25 seconds
 int turboAMaxCount = turboADurationMs / TURBO_A_INTERVAL_MS; // Calculate max count based on duration
 
+// Turbo Moon Reset button variables
+QTimer *turboMoonResetTimer = nullptr;
+QTimer *turboMoonATimer = nullptr;
+bool turboMoonResetActive = false;
+int turboMoonResetStage = 0;
+int turboMoonResetCount = 0;
+
+int turboMoonResetWaitMs = settings.value("turboMoonResetWaitMs", 5000).toInt(); // 5 seconds wait before turbo A
+int turboMoonADurationMs = settings.value("turboMoonADurationMs", 25000).toInt(); // 25 seconds
+int turboMoonAIntervalMs = settings.value("turboMoonAIntervalMs", 1000).toInt();   // 1 second
+int turboMoonAMaxCount = turboMoonADurationMs / turboMoonAIntervalMs; // Calculate max count based on duration
+
+// Reset counter variables
+int resetCounter = settings.value("resetCounter", 0).toInt();
+
 QGamepadManager::GamepadButton variantToButton(QVariant variant)
 {
     QGamepadManager::GamepadButton button;
@@ -337,6 +352,131 @@ void stopTurboVcReset()
     buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
     touchScreenPressed = false;
     sendFrame();
+}
+
+void startTurboMoonReset()
+{
+    if (turboMoonResetActive) return;
+    
+    qDebug() << "Starting Turbo Moon Reset sequence...";
+    turboMoonResetActive = true;
+    turboMoonResetStage = 0;
+    turboMoonResetCount = 0;
+    
+    if (!turboMoonResetTimer) {
+        turboMoonResetTimer = new QTimer();
+        turboMoonResetTimer->setSingleShot(true);
+        QObject::connect(turboMoonResetTimer, &QTimer::timeout, []() {
+            if (!turboMoonResetActive) return;
+            
+            switch (turboMoonResetStage) {
+                case 0: // Stage 1: Press L+R+select+start
+                    qDebug() << "Pressing L+R+select+start for Moon Reset";
+                    // Press L+R+select+start
+                    buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsMiddle[6]); // R
+                    buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsMiddle[7]); // L
+                    buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsMiddle[0]); // Select
+                    buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsMiddle[1]); // Start
+                    sendFrame();
+                    
+                    // Release after 100ms
+                    QTimer::singleShot(100, [=]() {
+                        buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[6])); // R
+                        buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[7])); // L
+                        buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[0])); // Select
+                        buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[1])); // Start
+                        sendFrame();
+                    });
+                    
+                    // Move to stage 2: Wait 5 seconds
+                    qDebug() << "Moon Reset complete. Waiting" << (turboMoonResetWaitMs/1000.0) << "seconds before Turbo A...";
+                    turboMoonResetStage = 1;
+                    turboMoonResetTimer->start(turboMoonResetWaitMs);
+                    break;
+                    
+                case 1: // Stage 2: Start Turbo A sequence
+                    qDebug() << "Starting Turbo A sequence for Moon Reset...";
+                    turboMoonResetStage = 2;
+                    turboMoonResetCount = 0;
+                    
+                    // Start the turbo A timer
+                    turboMoonATimer = new QTimer();
+                    turboMoonATimer->setSingleShot(false);
+                    QObject::connect(turboMoonATimer, &QTimer::timeout, []() {
+                        if (turboMoonResetActive && turboMoonResetCount < turboMoonAMaxCount) {
+                            // Press A button
+                            buttons |= QGamepadManager::GamepadButtons(1 << hidButtonsAB[0]);
+                            sendFrame();
+                            
+                            // Release A button after a short delay
+                            QTimer::singleShot(50, [=]() {
+                                buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
+                                sendFrame();
+                            });
+                            
+                            turboMoonResetCount++;
+                        } else {
+                            // Stop turbo mode
+                            qDebug() << "Turbo Moon Reset sequence complete!";
+                            turboMoonResetActive = false;
+                            turboMoonATimer->stop();
+                            turboMoonATimer->deleteLater();
+                            turboMoonATimer = nullptr;
+                        }
+                    });
+                    
+                    turboMoonATimer->start(turboMoonAIntervalMs);
+                    break;
+            }
+        });
+    }
+    
+    // Start the sequence
+    turboMoonResetTimer->start(0); // Start immediately
+}
+
+void stopTurboMoonReset()
+{
+    if (!turboMoonResetActive) return;
+    
+    qDebug() << "Stopping Turbo Moon Reset sequence...";
+    turboMoonResetActive = false;
+    
+    if (turboMoonResetTimer) {
+        turboMoonResetTimer->stop();
+    }
+    
+    if (turboMoonATimer) {
+        turboMoonATimer->stop();
+        turboMoonATimer->deleteLater();
+        turboMoonATimer = nullptr;
+    }
+    
+    // Reset any active button states
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsAB[0]));
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[6])); // R
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[7])); // L
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[0])); // Select
+    buttons &= QGamepadManager::GamepadButtons(~(1 << hidButtonsMiddle[1])); // Start
+    sendFrame();
+}
+
+void stopAllProcesses()
+{
+    stopTurboVcReset();
+    stopTurboMoonReset();
+}
+
+void incrementResetCounter()
+{
+    resetCounter++;
+    settings.setValue("resetCounter", resetCounter);
+}
+
+void resetCounterToZero()
+{
+    resetCounter = 0;
+    settings.setValue("resetCounter", resetCounter);
 }
 
 struct GamepadMonitor : public QObject {
@@ -889,14 +1029,15 @@ private:
     QVBoxLayout *layout;
     QFormLayout *formLayout;
     QCheckBox *invertYCheckbox, *invertABCheckbox, *invertXYCheckbox;
-    QPushButton *homeButton, *powerButton, *longPowerButton, *aButton, *vcResetButton, *remapConfigButton, *turboAButton, *stopTurboButton, *ipManagerButton;
-    QLabel *statusLabel;
+    QPushButton *homeButton, *powerButton, *longPowerButton, *aButton, *vcResetButton, *remapConfigButton, *turboAButton, *turboMoonResetButton, *stopProcessButton, *ipManagerButton, *resetCounterButton;
+    QLabel *statusLabel, *resetCounterLabel;
     TouchScreen *touchScreen;
     RemapConfig *remapConfig;
     IPManagerDialog *ipManager;
     
     // Timer configuration inputs
     QLineEdit *turboVcResetIntervalEdit, *turboVcResetWaitEdit, *turboADurationEdit;
+    QLineEdit *turboMoonResetWaitEdit, *turboMoonAIntervalEdit, *turboMoonADurationEdit;
 public:
     Widget(QWidget *parent = nullptr) : QWidget(parent)
     {
@@ -907,15 +1048,44 @@ public:
         invertXYCheckbox = new QCheckBox(this);
         formLayout = new QFormLayout;
 
-        formLayout->addRow(tr("&Invert Y axis"), invertYCheckbox);
-        formLayout->addRow(tr("Invert A<->&B"), invertABCheckbox);
-        formLayout->addRow(tr("Invert X<->&Y"), invertXYCheckbox);
+        // Reset counter display and button at the top
+        QHBoxLayout *counterLayout = new QHBoxLayout();
+        resetCounterLabel = new QLabel(tr("Reset Count: %1").arg(resetCounter), this);
+        resetCounterLabel->setStyleSheet("QLabel { font-weight: bold; font-size: 14px; color: #4CAF50; }");
+        resetCounterButton = new QPushButton(tr("Reset Counter"), this);
+        resetCounterButton->setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; padding: 5px; border-radius: 3px; } QPushButton:hover { background-color: #d32f2f; }");
+        counterLayout->addWidget(resetCounterLabel);
+        counterLayout->addStretch();
+        counterLayout->addWidget(resetCounterButton);
         
-        // Timer configuration section
-        formLayout->addRow(tr(""), new QLabel(tr("Turbo VC Reset Timer Settings:"), this));
-        formLayout->addRow(tr("VC Reset Interval (ms)"), turboVcResetIntervalEdit = new QLineEdit(this));
-        formLayout->addRow(tr("Wait Time (ms)"), turboVcResetWaitEdit = new QLineEdit(this));
-        formLayout->addRow(tr("Turbo A Duration (ms)"), turboADurationEdit = new QLineEdit(this));
+        formLayout->addRow(tr(""), counterLayout);
+        
+        // Create horizontal layout for the two columns
+        QHBoxLayout *timerLayout = new QHBoxLayout();
+        timerLayout->setSpacing(20);
+        
+        // Left column - VC Reset settings
+        QFormLayout *vcForm = new QFormLayout();
+        vcForm->setHorizontalSpacing(10);
+        vcForm->setVerticalSpacing(5);
+        vcForm->addRow(tr("VC Reset (ms):"), new QLabel(tr(""), this));
+        vcForm->addRow(tr("Interval:"), turboVcResetIntervalEdit = new QLineEdit(this));
+        vcForm->addRow(tr("Wait:"), turboVcResetWaitEdit = new QLineEdit(this));
+        vcForm->addRow(tr("Duration:"), turboADurationEdit = new QLineEdit(this));
+        
+        // Right column - Moon Reset settings
+        QFormLayout *moonForm = new QFormLayout();
+        moonForm->setHorizontalSpacing(10);
+        moonForm->setVerticalSpacing(5);
+        moonForm->addRow(tr("Moon Reset (ms):"), new QLabel(tr(""), this));
+        moonForm->addRow(tr("Wait:"), turboMoonResetWaitEdit = new QLineEdit(this));
+        moonForm->addRow(tr("Interval:"), turboMoonAIntervalEdit = new QLineEdit(this));
+        moonForm->addRow(tr("Duration:"), turboMoonADurationEdit = new QLineEdit(this));
+        
+        timerLayout->addLayout(vcForm);
+        timerLayout->addLayout(moonForm);
+        
+        formLayout->addRow(tr(""), timerLayout);
         
         remapConfigButton = new QPushButton(tr("BUTTON &CONFIG"), this);
         remapConfigButton->setFocusPolicy(Qt::StrongFocus);
@@ -936,9 +1106,12 @@ public:
         turboAButton = new QPushButton(tr("TURBO VC &RESET"), this);
         turboAButton->setFocusPolicy(Qt::StrongFocus);
         turboAButton->setToolTip(tr("Start the Turbo VC Reset sequence (VC Reset x3, wait, then Turbo A)"));
-        stopTurboButton = new QPushButton(tr("STOP TURBO VC &RESET"), this);
-        stopTurboButton->setFocusPolicy(Qt::StrongFocus);
-        stopTurboButton->setToolTip(tr("Stop the currently running Turbo VC Reset sequence"));
+        turboMoonResetButton = new QPushButton(tr("TURBO MOON &RESET"), this);
+        turboMoonResetButton->setFocusPolicy(Qt::StrongFocus);
+        turboMoonResetButton->setToolTip(tr("Start the Turbo Moon Reset sequence (L+R+select+start, wait 5s, then A every second for 25s)"));
+        stopProcessButton = new QPushButton(tr("STOP &PROCESS"), this);
+        stopProcessButton->setFocusPolicy(Qt::StrongFocus);
+        stopProcessButton->setToolTip(tr("Stop any currently running turbo process (VC Reset or Moon Reset)"));
 
         // Initialize timer configuration inputs
         turboVcResetIntervalEdit->setClearButtonEnabled(true);
@@ -955,6 +1128,21 @@ public:
         turboADurationEdit->setText(QString::number(turboADurationMs));
         turboADurationEdit->setPlaceholderText("13500");
         turboADurationEdit->setToolTip(tr("Total duration of the Turbo A sequence (in milliseconds)"));
+        
+        turboMoonResetWaitEdit->setClearButtonEnabled(true);
+        turboMoonResetWaitEdit->setText(QString::number(turboMoonResetWaitMs));
+        turboMoonResetWaitEdit->setPlaceholderText("5000");
+        turboMoonResetWaitEdit->setToolTip(tr("Wait time after Moon Reset before starting Turbo A (in milliseconds)"));
+        
+        turboMoonAIntervalEdit->setClearButtonEnabled(true);
+        turboMoonAIntervalEdit->setText(QString::number(turboMoonAIntervalMs));
+        turboMoonAIntervalEdit->setPlaceholderText("1000");
+        turboMoonAIntervalEdit->setToolTip(tr("Time between A button presses in Moon Reset sequence (in milliseconds)"));
+        
+        turboMoonADurationEdit->setClearButtonEnabled(true);
+        turboMoonADurationEdit->setText(QString::number(turboMoonADurationMs));
+        turboMoonADurationEdit->setPlaceholderText("25000");
+        turboMoonADurationEdit->setToolTip(tr("Total duration of the Turbo A sequence for Moon Reset (in milliseconds)"));
 
         layout->addLayout(formLayout);
         layout->addWidget(ipManagerButton);
@@ -964,7 +1152,8 @@ public:
         layout->addWidget(aButton);
         layout->addWidget(vcResetButton);
         layout->addWidget(turboAButton);
-        layout->addWidget(stopTurboButton);
+        layout->addWidget(turboMoonResetButton);
+        layout->addWidget(stopProcessButton);
         layout->addWidget(remapConfigButton);
         
         // Status label to show active IPs
@@ -1061,6 +1250,41 @@ public:
             }
         });
 
+        connect(turboMoonResetWaitEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value >= 0) {
+                turboMoonResetWaitMs = value;
+                settings.setValue("turboMoonResetWaitMs", value);
+            }
+        });
+
+        connect(turboMoonAIntervalEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value > 0) {
+                turboMoonAIntervalMs = value;
+                turboMoonAMaxCount = turboMoonADurationMs / value;
+                settings.setValue("turboMoonAIntervalMs", value);
+            }
+        });
+
+        connect(turboMoonADurationEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok;
+            int value = text.toInt(&ok);
+            if (ok && value > 0) {
+                turboMoonADurationMs = value;
+                turboMoonAMaxCount = value / turboMoonAIntervalMs;
+                settings.setValue("turboMoonADurationMs", value);
+            }
+        });
+
         connect(homeButton, &QPushButton::pressed, this,
                 [](void)
         {
@@ -1118,11 +1342,13 @@ public:
         });
 
         connect(vcResetButton, &QPushButton::pressed, this,
-                [](void)
+                [this](void)
         {
            touchScreenPressed = true;
            touchScreenPosition = QPoint(TOUCH_SCREEN_WIDTH - 75, TOUCH_SCREEN_HEIGHT - 55);
            sendFrame();
+           incrementResetCounter();
+           resetCounterLabel->setText(tr("Reset Count: %1").arg(resetCounter));
         });
 
         connect(vcResetButton, &QPushButton::released, this,
@@ -1133,15 +1359,32 @@ public:
         });
 
         connect(turboAButton, &QPushButton::pressed, this,
-                [](void)
+                [this](void)
         {
            startTurboVcReset();
+           incrementResetCounter();
+           resetCounterLabel->setText(tr("Reset Count: %1").arg(resetCounter));
         });
 
-        connect(stopTurboButton, &QPushButton::pressed, this,
+        connect(turboMoonResetButton, &QPushButton::pressed, this,
+                [this](void)
+        {
+           startTurboMoonReset();
+           incrementResetCounter();
+           resetCounterLabel->setText(tr("Reset Count: %1").arg(resetCounter));
+        });
+
+        connect(stopProcessButton, &QPushButton::pressed, this,
                 [](void)
         {
-           stopTurboVcReset();
+           stopAllProcesses();
+        });
+
+        connect(resetCounterButton, &QPushButton::pressed, this,
+                [this](void)
+        {
+           resetCounterToZero();
+           resetCounterLabel->setText(tr("Reset Count: %1").arg(resetCounter));
         });
 
         connect(remapConfigButton, &QPushButton::released, this,
@@ -1218,7 +1461,7 @@ public:
         interfaceButtons = 0;
         touchScreenPressed = false;
         
-        // Stop and cleanup turbo A timer
+        // Stop and cleanup turbo timers
         if (turboVcResetTimer) {
             turboVcResetTimer->stop();
             delete turboVcResetTimer;
@@ -1229,7 +1472,18 @@ public:
             delete turboATimer;
             turboATimer = nullptr;
         }
+        if (turboMoonResetTimer) {
+            turboMoonResetTimer->stop();
+            delete turboMoonResetTimer;
+            turboMoonResetTimer = nullptr;
+        }
+        if (turboMoonATimer) {
+            turboMoonATimer->stop();
+            delete turboMoonATimer;
+            turboMoonATimer = nullptr;
+        }
         turboVcResetActive = false;
+        turboMoonResetActive = false;
         
         sendFrame();
         delete touchScreen;
