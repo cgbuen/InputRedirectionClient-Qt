@@ -87,13 +87,23 @@ int turboMoonADurationMs = settings.value("turboMoonADurationMs", 25000).toInt()
 int turboMoonAIntervalMs = settings.value("turboMoonAIntervalMs", 1000).toInt();   // 1 second
 int turboMoonAMaxCount = turboMoonADurationMs / turboMoonAIntervalMs; // Calculate max count based on duration
 
+// Direction hold timers and settings for Moon Reset
+QTimer *moonDirHoldStartTimer = nullptr;
+QTimer *moonDirHoldStopTimer = nullptr;
+int moonResetDirectionDelayMs = settings.value("moonResetDirectionDelayMs", 0).toInt();
+int moonResetDirectionDurationMs = settings.value("moonResetDirectionDurationMs", turboMoonADurationMs).toInt();
+
 // Moon reset joystick direction
 enum MoonResetDirection {
     MOON_RESET_NONE = 0,
     MOON_RESET_UP = 1,
     MOON_RESET_DOWN = 2,
     MOON_RESET_LEFT = 3,
-    MOON_RESET_RIGHT = 4
+    MOON_RESET_RIGHT = 4,
+    MOON_RESET_UP_LEFT = 5,
+    MOON_RESET_UP_RIGHT = 6,
+    MOON_RESET_DOWN_LEFT = 7,
+    MOON_RESET_DOWN_RIGHT = 8
 };
 int moonResetDirection = settings.value("moonResetDirection", MOON_RESET_NONE).toInt();
 
@@ -409,24 +419,34 @@ void startTurboMoonReset()
                     turboMoonResetStage = 2;
                     turboMoonResetCount = 0;
                     
-                    // Apply joystick direction if selected
+                    // Schedule joystick direction hold if selected
                     if (moonResetDirection != MOON_RESET_NONE) {
-                        switch (moonResetDirection) {
-                            case MOON_RESET_UP:
-                                ly = -1.0; // Up direction
-                                break;
-                            case MOON_RESET_DOWN:
-                                ly = 1.0;  // Down direction
-                                break;
-                            case MOON_RESET_LEFT:
-                                lx = -1.0; // Left direction
-                                break;
-                            case MOON_RESET_RIGHT:
-                                lx = 1.0;  // Right direction
-                                break;
-                        }
-                        sendFrame();
-                        qDebug() << "Holding joystick direction during Moon Reset duration";
+                        if (!moonDirHoldStartTimer) { moonDirHoldStartTimer = new QTimer(); moonDirHoldStartTimer->setSingleShot(true); }
+                        if (!moonDirHoldStopTimer)  { moonDirHoldStopTimer  = new QTimer(); moonDirHoldStopTimer->setSingleShot(true); }
+
+                        QObject::connect(moonDirHoldStartTimer, &QTimer::timeout, [](){
+                            lx = 0.0; ly = 0.0;
+                            switch (moonResetDirection) {
+                                case MOON_RESET_UP:          ly = -1.0; break;
+                                case MOON_RESET_DOWN:        ly =  1.0; break;
+                                case MOON_RESET_LEFT:        lx = -1.0; break;
+                                case MOON_RESET_RIGHT:       lx =  1.0; break;
+                                case MOON_RESET_UP_LEFT:     lx = -M_SQRT1_2; ly = -M_SQRT1_2; break;
+                                case MOON_RESET_UP_RIGHT:    lx =  M_SQRT1_2; ly = -M_SQRT1_2; break;
+                                case MOON_RESET_DOWN_LEFT:   lx = -M_SQRT1_2; ly =  M_SQRT1_2; break;
+                                case MOON_RESET_DOWN_RIGHT:  lx =  M_SQRT1_2; ly =  M_SQRT1_2; break;
+                                default: break;
+                            }
+                            sendFrame();
+                        });
+
+                        QObject::connect(moonDirHoldStopTimer, &QTimer::timeout, [](){
+                            lx = 0.0; ly = 0.0; sendFrame();
+                        });
+
+                        moonDirHoldStartTimer->start(moonResetDirectionDelayMs);
+                        moonDirHoldStopTimer->start(moonResetDirectionDelayMs + moonResetDirectionDurationMs);
+                        qDebug() << "Scheduled direction hold with delay" << moonResetDirectionDelayMs << "and duration" << moonResetDirectionDurationMs;
                     }
                     
                     // Start the turbo A timer
@@ -485,6 +505,16 @@ void stopTurboMoonReset()
         turboMoonATimer->stop();
         turboMoonATimer->deleteLater();
         turboMoonATimer = nullptr;
+    }
+    if (moonDirHoldStartTimer) {
+        moonDirHoldStartTimer->stop();
+        moonDirHoldStartTimer->deleteLater();
+        moonDirHoldStartTimer = nullptr;
+    }
+    if (moonDirHoldStopTimer) {
+        moonDirHoldStopTimer->stop();
+        moonDirHoldStopTimer->deleteLater();
+        moonDirHoldStopTimer = nullptr;
     }
     
     // Reset any active button states
@@ -1077,6 +1107,7 @@ private:
     // Timer configuration inputs
     QLineEdit *turboVcResetIntervalEdit, *turboVcResetWaitEdit, *turboADurationEdit;
     QLineEdit *turboMoonResetWaitEdit, *turboMoonAIntervalEdit, *turboMoonADurationEdit;
+    QLineEdit *moonDirDelayEdit, *moonDirDurationEdit;
     QComboBox *moonResetDirectionCombo;
 public:
     Widget(QWidget *parent = nullptr) : QWidget(parent)
@@ -1121,6 +1152,8 @@ public:
         moonForm->addRow(tr("Wait:"), turboMoonResetWaitEdit = new QLineEdit(this));
         moonForm->addRow(tr("Interval:"), turboMoonAIntervalEdit = new QLineEdit(this));
         moonForm->addRow(tr("Duration:"), turboMoonADurationEdit = new QLineEdit(this));
+        moonForm->addRow(tr("Dir Delay (ms):"), moonDirDelayEdit = new QLineEdit(this));
+        moonForm->addRow(tr("Dir Duration (ms):"), moonDirDurationEdit = new QLineEdit(this));
         
         // Add joystick direction dropdown
         moonResetDirectionCombo = new QComboBox(this);
@@ -1129,6 +1162,10 @@ public:
         moonResetDirectionCombo->addItem(tr("Down"), MOON_RESET_DOWN);
         moonResetDirectionCombo->addItem(tr("Left"), MOON_RESET_LEFT);
         moonResetDirectionCombo->addItem(tr("Right"), MOON_RESET_RIGHT);
+        moonResetDirectionCombo->addItem(tr("Up-Left"), MOON_RESET_UP_LEFT);
+        moonResetDirectionCombo->addItem(tr("Up-Right"), MOON_RESET_UP_RIGHT);
+        moonResetDirectionCombo->addItem(tr("Down-Left"), MOON_RESET_DOWN_LEFT);
+        moonResetDirectionCombo->addItem(tr("Down-Right"), MOON_RESET_DOWN_RIGHT);
         moonResetDirectionCombo->setCurrentIndex(moonResetDirection);
         moonResetDirectionCombo->setToolTip(tr("Joystick direction to hold during Moon Reset duration"));
         moonForm->addRow(tr("Direction:"), moonResetDirectionCombo);
@@ -1194,6 +1231,16 @@ public:
         turboMoonADurationEdit->setText(QString::number(turboMoonADurationMs));
         turboMoonADurationEdit->setPlaceholderText("25000");
         turboMoonADurationEdit->setToolTip(tr("Total duration of the Turbo A sequence for Moon Reset (in milliseconds)"));
+
+        moonDirDelayEdit->setClearButtonEnabled(true);
+        moonDirDelayEdit->setText(QString::number(moonResetDirectionDelayMs));
+        moonDirDelayEdit->setPlaceholderText("0");
+        moonDirDelayEdit->setToolTip(tr("Delay before holding the selected direction (in milliseconds)"));
+
+        moonDirDurationEdit->setClearButtonEnabled(true);
+        moonDirDurationEdit->setText(QString::number(moonResetDirectionDurationMs));
+        moonDirDurationEdit->setPlaceholderText(QString::number(turboMoonADurationMs));
+        moonDirDurationEdit->setToolTip(tr("How long to hold the selected direction (in milliseconds)"));
 
         layout->addLayout(formLayout);
         layout->addWidget(ipManagerButton);
@@ -1341,6 +1388,26 @@ public:
         {
             moonResetDirection = index;
             settings.setValue("moonResetDirection", index);
+        });
+
+        connect(moonDirDelayEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok; int value = text.toInt(&ok);
+            if (ok && value >= 0) {
+                moonResetDirectionDelayMs = value;
+                settings.setValue("moonResetDirectionDelayMs", value);
+            }
+        });
+
+        connect(moonDirDurationEdit, &QLineEdit::textChanged, this,
+                [](const QString &text)
+        {
+            bool ok; int value = text.toInt(&ok);
+            if (ok && value >= 0) {
+                moonResetDirectionDurationMs = value;
+                settings.setValue("moonResetDirectionDurationMs", value);
+            }
         });
 
         connect(homeButton, &QPushButton::pressed, this,
@@ -1539,6 +1606,16 @@ public:
             turboMoonATimer->stop();
             delete turboMoonATimer;
             turboMoonATimer = nullptr;
+        }
+        if (moonDirHoldStartTimer) {
+            moonDirHoldStartTimer->stop();
+            delete moonDirHoldStartTimer;
+            moonDirHoldStartTimer = nullptr;
+        }
+        if (moonDirHoldStopTimer) {
+            moonDirHoldStopTimer->stop();
+            delete moonDirHoldStopTimer;
+            moonDirHoldStopTimer = nullptr;
         }
         turboVcResetActive = false;
         turboMoonResetActive = false;
